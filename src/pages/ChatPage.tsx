@@ -121,12 +121,7 @@ function ChatPage() {
       botMessages.forEach((botText) => {
         appendMessage({
           sender: 'bot',
-          text: botText,
-          meta: {
-            predictionType: response.predictionType,
-            reason: response.reason,
-            confidence: response.confidence,
-          },
+          text: botText
         })
       })
 
