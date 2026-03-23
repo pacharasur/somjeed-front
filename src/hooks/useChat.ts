@@ -2,146 +2,158 @@ import { useEffect, useRef, useState } from 'react'
 import { sendChatMessage } from '../services/api'
 import type { Message } from '../types/chat'
 
-const ERROR_MESSAGE = 'Sorry, I could not get a response right now.'
-const INACTIVITY_MESSAGE_1 = 'Do you need any further assistance?'
+const FOLLOW_UP_MESSAGE = 'Do you need any further assistance?'
 const CLOSING_MESSAGE_1 = 'Thanks for chatting with me today.'
-const CLOSING_MESSAGE_2 =
-  'Before you go, could you rate your experience?'
+const CLOSING_MESSAGE_2 = 'Before you go, could you rate your experience?'
+const ERROR_MESSAGE = 'Sorry, something went wrong. Please try again.'
+const GREETING_ERROR_MESSAGE = 'Failed to load greeting'
 
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
   const [showFeedback, setShowFeedback] = useState(false)
-  const hasInitializedRef = useRef(false)
-  const userActivityIdRef = useRef(0)
-  const timerOneRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const timerTwoRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const hasClosingMessageRef = useRef(false)
+  const [userId, setUserId] = useState('')
 
-  const addMessages = (sender: Message['sender'], texts: string[]) => {
-    const newMessages = texts
-      .map((text) => text.trim())
-      .filter((text) => text.length > 0)
-      .map((text) => ({ sender, text }))
+  const firstTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const secondTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const activityTokenRef = useRef(0)
+  const requestTokenRef = useRef(0)
+  const closingShownRef = useRef(false)
 
-    if (newMessages.length === 0) {
-      return
-    }
-
-    setMessages((previousMessages) => [...previousMessages, ...newMessages])
+  const appendMessage = (message: Message) => {
+    setMessages((prev) => [...prev, message])
   }
 
-  const sendBotMessage = (message: string) => {
-    addMessages('bot', [message])
+  const sendBotMessage = (text: string) => {
+    appendMessage({ sender: 'bot', text })
   }
 
   const clearInactivityTimers = () => {
-    if (timerOneRef.current) {
-      clearTimeout(timerOneRef.current)
-      timerOneRef.current = null
+    if (firstTimerRef.current) {
+      clearTimeout(firstTimerRef.current)
+      firstTimerRef.current = null
     }
 
-    if (timerTwoRef.current) {
-      clearTimeout(timerTwoRef.current)
-      timerTwoRef.current = null
+    if (secondTimerRef.current) {
+      clearTimeout(secondTimerRef.current)
+      secondTimerRef.current = null
     }
   }
 
-  const sendClosingMessage = () => {
-    if (hasClosingMessageRef.current) {
+  const sendClosingMessage = (token: number) => {
+    if (closingShownRef.current || token !== activityTokenRef.current) {
       return
     }
 
-    hasClosingMessageRef.current = true
+    closingShownRef.current = true
     sendBotMessage(CLOSING_MESSAGE_1)
     sendBotMessage(CLOSING_MESSAGE_2)
     setShowFeedback(true)
   }
 
-  const resetInactivityTimer = (activityId: number) => {
+  const resetInactivityTimer = (token: number) => {
     clearInactivityTimers()
-
-    timerOneRef.current = setTimeout(() => {
-      if (userActivityIdRef.current === activityId && !hasClosingMessageRef.current) {
-        sendBotMessage(INACTIVITY_MESSAGE_1)
+    firstTimerRef.current = setTimeout(() => {
+      if (token === activityTokenRef.current && !closingShownRef.current) {
+        sendBotMessage(FOLLOW_UP_MESSAGE)
       }
     }, 10000)
 
-    timerTwoRef.current = setTimeout(() => {
-      if (userActivityIdRef.current === activityId && !hasClosingMessageRef.current) {
-        sendClosingMessage()
+    secondTimerRef.current = setTimeout(() => {
+      if (token === activityTokenRef.current && !closingShownRef.current) {
+        sendClosingMessage(token)
       }
-    }, 10000)
+    }, 20000)
   }
 
-  useEffect(() => {
-    if (hasInitializedRef.current) {
+  const sendMessage = async (message: string, overrideUserId?: string) => {
+    const resolvedUserId = overrideUserId || userId
+    const trimmedInput = message.trim()
+
+    if (!trimmedInput || !resolvedUserId) {
       return
     }
-    hasInitializedRef.current = true
 
-    const loadInitialGreeting = async () => {
-      setLoading(true)
+    const isInitMessage = trimmedInput === 'INIT'
+    const requestToken = requestTokenRef.current + 1
+    requestTokenRef.current = requestToken
 
-      try {
-        const data = await sendChatMessage({
-          userId: 'user_001',
-          message: 'hello',
-        })
-        addMessages('bot', [data.message || ERROR_MESSAGE])
-      } catch (error) {
-        console.error('Initial greeting error:', error)
-        addMessages('bot', ['Sorry, I could not load the greeting right now.'])
-      } finally {
+    activityTokenRef.current += 1
+    const nextActivityToken = activityTokenRef.current
+    closingShownRef.current = false
+    setShowFeedback(false)
+    clearInactivityTimers()
+
+    if (!isInitMessage) {
+      appendMessage({ sender: 'user', text: trimmedInput })
+    }
+
+    setLoading(true)
+
+    try {
+      const response = await sendChatMessage({
+        userId: resolvedUserId,
+        message: trimmedInput,
+      })
+
+      if (requestToken !== requestTokenRef.current) {
+        return
+      }
+
+      const botMessages =
+        response.messages && response.messages.length > 0
+          ? response.messages
+          : [response.message || ERROR_MESSAGE]
+
+      botMessages.forEach((botText) => {
+        sendBotMessage(botText)
+      })
+      resetInactivityTimer(nextActivityToken)
+    } catch (error) {
+      console.error('Chat API error:', error)
+
+      if (requestToken !== requestTokenRef.current) {
+        return
+      }
+
+      sendBotMessage(isInitMessage ? GREETING_ERROR_MESSAGE : ERROR_MESSAGE)
+      resetInactivityTimer(nextActivityToken)
+    } finally {
+      if (requestToken === requestTokenRef.current) {
         setLoading(false)
       }
     }
+  }
 
-    void loadInitialGreeting()
+  const handleUserChange = async (nextUserId: string) => {
+    setUserId(nextUserId)
+    setMessages([])
+    setShowFeedback(false)
+    setLoading(false)
 
+    requestTokenRef.current += 1
+    closingShownRef.current = false
+    clearInactivityTimers()
+
+    if (!nextUserId) {
+      return
+    }
+
+    await sendMessage('INIT', nextUserId)
+  }
+
+  useEffect(() => {
     return () => {
       clearInactivityTimers()
     }
   }, [])
 
-  const sendMessage = async (message: string) => {
-    const trimmedMessage = message.trim()
-    if (!trimmedMessage || loading) {
-      return
-    }
-
-    userActivityIdRef.current += 1
-    hasClosingMessageRef.current = false
-    setShowFeedback(false)
-    clearInactivityTimers()
-    addMessages('user', [trimmedMessage])
-    setLoading(true)
-
-    try {
-      const data = await sendChatMessage({
-        userId: 'user_001',
-        message: trimmedMessage,
-      })
-      addMessages('bot', [data.message || ERROR_MESSAGE])
-      resetInactivityTimer(userActivityIdRef.current)
-    } catch (error) {
-      console.error('Chat API error:', error)
-      addMessages('bot', [ERROR_MESSAGE])
-      resetInactivityTimer(userActivityIdRef.current)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const hideFeedback = () => {
-    setShowFeedback(false)
-  }
-
   return {
     messages,
     loading,
-    sendMessage,
     showFeedback,
-    hideFeedback,
+    userId,
+    sendMessage,
+    handleUserChange,
   }
 }
